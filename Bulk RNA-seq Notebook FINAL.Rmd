@@ -1,0 +1,181 @@
+---
+title: "Bulk RNA-seq by Gautam Kumar"
+output: html_notebook
+---
+
+```{r}
+#LOAD REQUIRED PACKAGES#
+
+library(biomaRt)
+library(edgeR)
+library(DESeq2)
+library(gprofiler2)
+```
+
+```{r}
+#LOAD COUNT DATA#
+
+data_path <- readline(prompt = "Load in your count data by inputting the path (NO QUOTATION MARKS): ")
+count_data <- read.csv(data_path, check.names = FALSE, stringsAsFactors = FALSE, header = TRUE)
+
+#If you need to alter the count data, do it separately and then proceed to the next step to check if your data frame is appropriately structured#
+
+```
+
+```{r}
+#Make sure the gene names are in the first column#
+head(count_data[,1], 20)
+#Make sure the sample names are the row names#
+head(names(count_data), 20)
+
+#If your gene names end with a dot and then a number, these are version numbers and should be removed running this code separately: count_data$Geneid <- gsub("\\..*","",count_data$Geneid)#
+
+#Make sure to replace "Geneid" with whatever the column name for the column containing the gene name in your dataset is#
+
+#After making the required adjustments, you can rerun this chunk to check whether your dataset is ready#
+
+```
+
+```{r}
+#Now that your gene names are properly set, it is time to convert them into gene symbols#
+#The code below is specifed for human datasets; to use mouse dataset, replace "hsapiens_gene_ensembl" with "mmusculus_gene_ensembl" in the useMart command and replace "hgnc_symbol" with "mgi_symbol" where it appears#
+#IMPORTANT: THIS IS FOR ENSEMBL GENES - FOR ENTREZ, LOOK UP THE ARGUMENTS TO ALTER THE COMMANDS BELOW#
+
+ensembl = useMart("ensembl",dataset="hsapiens_gene_ensembl")
+attr.string = c('ensembl_gene_id', 'hgnc_symbol')
+gene.annotation = getBM(attributes=attr.string, 
+                        filters =  'ensembl_gene_id', 
+                        values = count_data[,1], 
+                        mart = ensembl)
+
+#for duplicated gene symbols, replace with gene name#
+gene.annotation[duplicated(gene.annotation$hgnc_symbol)==TRUE,]$hgnc_symbol <- gene.annotation[duplicated(gene.annotation$hgnc_symbol)==TRUE,]$ensembl_gene_id
+#for empty gene symbols, replace with gene name#
+gene.annotation$hgnc_symbol[gene.annotation$hgnc_symbol == ""] <- gene.annotation$ensembl_gene_id[gene.annotation$hgnc_symbol == ""]
+#remove any remaining duplicates#
+gene.annotation <- gene.annotation[duplicated(gene.annotation$hgnc_symbol) == FALSE,]
+
+names(count_data)[1] <- names(gene.annotation)[1]
+colnames(count_data)[1] <- colnames(gene.annotation)[1]
+
+#merge gene count dataframe with annotation dataframe by matching gene names#
+count_data <- merge(gene.annotation,count_data, by=c("ensembl_gene_id"))
+count_data$hgnc_symbol[duplicated(count_data$hgnc_symbol)] <- count_data$ensembl_gene_id[duplicated(count_data$hgnc_symbol)]
+count_data <- count_data[!duplicated(count_data$hgnc_symbol),]
+
+rownames(count_data) <- count_data$hgnc_symbol
+count_data <- count_data[3:ncol(count_data)]
+
+head(count_data)[1:5]
+
+#MAKE SURE TO DO ANY NEEDED FURTHER CLEANING#
+```
+
+```{r}
+#From this point, if you want to transfer analysis to a subset of the dataset, use this chunk to change the 'count_data' variable to the subsetted dataset of your choice#
+
+new_dataset_name <- noquote(readline(prompt = "Name of new (subsetted) dataset: "))
+count_data <- eval(parse(text = new_dataset_name))
+
+```
+
+```{r}
+#IMPORT METADATA#
+
+meta_path <- readline(prompt = "Load in your metadata by inputting the path (NO QUOTATION MARKS): ")
+meta_data <- read.csv(meta_path, check.names = FALSE, stringsAsFactors = FALSE, header = TRUE)
+
+head(meta_data)
+```
+
+```{r}
+#Check if sample/subject name in meta data matches column names count data#
+subj <- c(readline(prompt = "Type in the name of the variable containing sample/subject name: "))
+
+table(colnames(count_data) %in% meta_data[,subj])
+
+#MAKE NECESSARY EDITS IF NAMES DON'T MATCH#
+```
+
+```{r}
+#Subset data and metadata by variable of interest; if new variables need to be created in the metadata, create them before this step#
+
+var_int <- c(readline(prompt = "Type in the name of the variable of interest: "))
+subset_meta_data <- meta_data[is.na(meta_data[,var_int]) == FALSE,]
+subset_meta_data[,var_int] <- as.factor(subset_meta_data[,var_int])
+subset_meta_data <- unique(subset_meta_data)
+table(subset_meta_data[,var_int])
+
+```
+
+```{r}
+#Subset data and metadata to match one another#
+
+final_count_data <- count_data[names(count_data) %in% subset_meta_data[,subj]]
+final_meta_data <- subset_meta_data[subset_meta_data[,subj] %in% names(final_count_data),]
+
+table(names(final_count_data) %in% final_meta_data[,subj])
+table(final_meta_data[,subj] %in% names(final_count_data))
+```
+
+```{r}
+#DESeq2 Analysis#
+
+dge_deseq <- DESeqDataSetFromMatrix(countData = final_count_data,
+                                        colData = final_meta_data, 
+                                        design = as.formula(paste0("~",var_int)))
+dge_deseq <- DESeq(dge_deseq)
+results_dge_deseq <- results(dge_deseq)
+
+results_dge_deseq <- na.omit(results_dge_deseq)
+results_dge_deseq <- results_dge_deseq[results_dge_deseq$padj < 0.05,]
+results_dge_deseq <- results_dge_deseq[order(abs(results_dge_deseq$log2FoldChange)),]
+
+head(results_dge_deseq)
+```
+
+```{r}
+#edge R Analysis#
+final_count_data <- final_count_data[final_meta_data[,subj]]
+
+dge_edger <- DGEList(counts = final_count_data, group = final_meta_data[,var_int])
+keep <- filterByExpr(dge_edger)
+dge_edger <- dge_edger[keep,,keep.lib.sizes=FALSE]
+dge_edger <- calcNormFactors(dge_edger)
+design <- model.matrix(~ 0 + dge_edger$samples$group)
+colnames(design) <- gsub(".*group","",colnames(design))
+dge_edger <- estimateDisp(dge_edger,design)
+fit_edger <- glmQLFit(dge_edger,design)
+qlf_edger <- glmQLFTest(fit_edger,coef=2)
+results_dge_edger <- topTags(qlf_edger, n=70000, adjust.method = "BH", sort.by = "logFC", p.value = 0.05)
+
+head(results_dge_edger)
+
+
+```
+
+```{r}
+edger_results <- data.frame(results_dge_edger)
+edger_results <- edger_results[order(-abs(edger_results$logFC)),]
+
+deseq_results <- data.frame(results_dge_deseq)
+deseq_results <- deseq_results[order(-abs(deseq_results$log2FoldChange)),]
+
+##IF YOU ARE USING MOUSE DATA, CHANGE THE 'organism' ENTRY FROM 'hsapiens' TO 'mmusculus'##
+edger_gost_unordered <- gost(rownames(edger_results), organism = "hsapiens", ordered_query = FALSE, significant = TRUE, evcodes = TRUE, user_threshold = 0.05, correction_method = c("g_SCS","bonferroni","fdr","false_discovery_rate","gSCS","analytical"))
+edger_gost_ordered <- gost(rownames(edger_results), organism = "hsapiens", ordered_query = TRUE, significant = TRUE, evcodes = TRUE, user_threshold = 0.05, correction_method = c("g_SCS","bonferroni","fdr","false_discovery_rate","gSCS","analytical"))
+
+deseq_gost_unordered <- gost(rownames(deseq_results), organism = "hsapiens", ordered_query = FALSE, significant = TRUE, evcodes = TRUE, user_threshold = 0.05, correction_method = c("g_SCS","bonferroni","fdr","false_discovery_rate","gSCS","analytical"))
+deseq_gost_ordered <- gost(rownames(deseq_results), organism = "hsapiens", ordered_query = TRUE, significant = TRUE, evcodes = TRUE, user_threshold = 0.05, correction_method = c("g_SCS","bonferroni","fdr","false_discovery_rate","gSCS","analytical"))
+
+head(edger_gost_unordered)
+head(edger_gost_ordered)
+```
+
+
+```{r}
+display_dataset <- noquote(readline(prompt = "Which functional analysis results do you want to display: "))
+display <- eval(parse(text = display_dataset))
+gostplot(display, capped = TRUE, interactive = TRUE)
+
+```

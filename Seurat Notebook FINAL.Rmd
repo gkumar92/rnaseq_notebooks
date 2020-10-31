@@ -1,0 +1,174 @@
+---
+title: "Single Cell/Single Nucleus RNA-Seq by Gautam Kumar"
+output: html_notebook
+---
+
+```{r}
+#LOAD PACKAGES#
+
+library(scater)
+library(Seurat)
+library(scran)
+library(dplyr)
+library(Matrix)
+library(clustree)
+library(gprofiler2)
+```
+
+#Select from one of the two options to read in data below#
+```{r}
+#READ IN DATASET (if 10x)#
+
+data_dir <- readline(prompt = "Input the path to the directory containing the 10x data (NO QUOTATION MARKS): ")
+data_10x <- Read10X(data_dir)
+seurat_object <- CreateSeuratObject(data_10x)
+```
+
+```{r}
+#READ IN DATASET (if not 10x)#
+#You might have to alter code depending on how raw data is structured#
+
+matrix_path <- readline(prompt = "Input the path to matrix file (NO QUOTATION MARKS): ")
+count_data <- read.csv(matrix_path, check.names = FALSE, row.names = 1, stringsAsFactors = FALSE)
+seurat_object <- CreateSeuratObject(count_data)
+
+```
+
+```{r}
+#Prepare data for analysis#
+#IF DATASET IS HUMAN, CHANGE THE MITOCHONDRIA PATTERN FROM "^mt-" TO "^MT-"
+
+#filter cells with high mitochondrial gene counts#
+seurat_object[["percent.mt"]] <- PercentageFeatureSet(seurat_object, pattern = "^MT-")
+
+#prepare data for analysis by normalizing the gene expression data, identifying highly variable genes, scaling the data and performing dimension reduction (PCA)#
+seurat_object <- NormalizeData(seurat_object)
+seurat_object <- FindVariableFeatures(seurat_object)
+seurat_object <- ScaleData(seurat_object, features = rownames(seurat_object))
+seurat_object <- RunPCA(seurat_object, features = VariableFeatures(object = seurat_object))
+```
+
+```{r}
+#Select output directory#
+
+#identify the directory in which you want to create a new folder to put your outputs#
+main_dir <- readline(prompt = "Select directory to place output directory (NO QUOTATION MARKS): ")
+
+#create a folder named after today's date#
+today_date <- readline(prompt = "month_day: ")
+dir.create(paste0(main_dir,"/",today_date))
+new_directory <- paste0(main_dir,"/",today_date)
+```
+
+#If you know what dimension and resolution you will use, use the chunk below. If you want to find the ideal dimensons and resolutions, use the chunk after#
+
+```{r}
+#select the number of dimensions and resolution# 
+dim <- readline(prompt = "Choose number of dimensions: ")
+res <- readline(prompt = "Choose resolution parameter: ")
+
+#seurat will use the parameters to create a UMAP plot#
+seurat_object <- FindNeighbors(object = seurat_object, dims = 1:as.numeric(dim))
+seurat_object <- FindClusters(object = seurat_object, resolution = as.numeric(res))
+seurat_object <- RunUMAP(object = seurat_object, dims = 1:as.numeric(dim))
+
+#the UMAP plot will be saved in the new directory#
+DimPlot(object = seurat_object, reduction = 'umap', label = TRUE) + labs(title = paste0("dim_",as.character(dim),"_res_",as.character(res)))
+
+ggsave(paste0(new_directory,"/","UMAP_","dim_",as.character(dim),"_res_",as.character(res),".jpg"))
+
+#identify the markers for each cluster in the UMAP - all markers and markers that are only positive#
+all.markers <- FindAllMarkers(seurat_object)
+all.markers.pos <- FindAllMarkers(seurat_object, only.pos = TRUE)
+
+write.csv(all.markers, file = paste0(new_directory,"/","dim_",as.character(dim),"_res_",as.character(res),".csv"))
+write.csv(all.markers.pos, file = paste0(new_directory,"/","dim_",as.character(dim),"_res_",as.character(res),"_pos",".csv"))
+```
+
+```{r}
+min_dim <- readline(prompt = "Choose the lowest number of dimensions: ")
+max_dim <- readline(prompt = "Choose the highest number of dimensions: ")
+int_dim <- readline(prompt = "What intervals of dimensions would you like to select (ex. 1, 3, 5): ")
+min_res <- readline(prompt = "Choose the lowest resolution: ")
+max_res <- readline(prompt = "Choose the highest resolution: ")
+int_res <- readline(prompt = "What intervals of resolutions would you like to select (ex. 0.1, 0.3): ")
+
+dim_range <- seq(as.numeric(min_dim), as.numeric(max_dim), by = as.numeric(int_dim))
+res_range <- seq(as.numeric(min_res), as.numeric(max_res), by = as.numeric(int_res))
+dim_res_combo<-expand.grid(dim_range,res_range)
+
+#the function below will run through every combination of dimensions and resolutions selected#
+
+for(row in 1:nrow(dim_res_combo)) {
+  dim_num <- dim_res_combo[row,"Var1"]
+  res_num <- dim_res_combo[row,"Var2"]
+  
+  seurat_object <- FindNeighbors(object = seurat_object, dims = 1:as.numeric(dim_num))
+
+  dir.create(paste0(new_directory,"/",dim_num, " Dimensions"))
+  dimension_directory <- paste0(new_directory,"/",dim_num," Dimensions")
+    
+  seurat_object <- FindClusters(object = seurat_object, resolution = res_num)
+  seurat_object <- RunUMAP(object = seurat_object, dims = 1:dim_num)
+  
+  DimPlot(object = seurat_object, reduction = 'umap', label = TRUE) + labs(title = paste0("dim_",as.character(dim_num),"_res_",as.character(res_num)))
+  
+  ggsave(paste0(dimension_directory,"/","UMAP_","dim_",as.character(dim_num),"_res_",as.character(res_num),".jpg"))
+  
+  all.markers <- FindAllMarkers(seurat_object)
+  write.csv(all.markers, file = paste0(dimension_directory,"/","UMAP_","dim_",as.character(dim_num),"_res_",as.character(res_num),".csv"))
+}
+```
+
+```{r}
+#Differential expression#
+
+diff_var <- readline(prompt = "Name the metadata variable for comparison: ")
+group1 <- readline(prompt = "Name the first group: ")
+group2 <- readline(prompt = "Name the second group: ")
+
+Idents(seurat_object) <- seurat_object@meta.data[as.character(diff_var)]
+
+markers <- FindMarkers(seurat_object, ident.1 = as.character(group1), ident.2 = as.character(group2))
+markers_pos <- FindMarkers(seurat_object, ident.1 = as.character(group1), ident.2 = as.character(group2), only.pos = TRUE)
+markers_sig <- markers[markers$p_val_adj < 0.05,]
+markers_pos_sig <- markers_pos[markers_pos$p_val_adj < 0.05,]
+
+write.csv(markers, file = paste0(new_directory,"/","markers_",as.character(group1),"_",as.character(group2),".csv"))
+write.csv(markers_pos, file = paste0(new_directory,"/","markers_pos_",as.character(group1),"_",as.character(group2),".csv"))
+write.csv(markers_sig, file = paste0(new_directory,"/","markers_sig_",as.character(group1),"_",as.character(group2),".csv"))
+write.csv(markers_pos_sig, file = paste0(new_directory,"/","markers_pos_sig_",as.character(group1),"_",as.character(group2),".csv"))
+
+```
+
+```{r}
+#Functional/network analysis#
+
+#select results dataframe#
+dataset_name <- noquote(readline(prompt = "Name the dataset for downstream analysis: "))
+functional_analysis <- eval(parse(text = dataset_name))
+functional_analysis <- functional_analysis[functional_analysis$p_val_adj < 0.05,]
+functional_analysis_subset <- functional_analysis[functional_analysis$cluster == as.character(readline(prompt = "Select cluster you want to analyze: ")),]
+functional_analysis_subset <- functional_analysis_subset[order(-abs(functional_analysis_subset$avg_logFC)),]
+
+#IF DATASET IS HUMAN, CHANGE "mmusculus" to "hsapiens"
+
+gost_unordered <- gost(rownames(functional_analysis_subset), organism = "mmusculus", ordered_query = FALSE, significant = TRUE, evcodes = TRUE, user_threshold = 0.05, correction_method = c("g_SCS","bonferroni","fdr","false_discovery_rate","gSCS","analytical"))
+gost_ordered <- gost(rownames(functional_analysis_subset), organism = "mmusculus", ordered_query = TRUE, significant = TRUE, evcodes = TRUE, user_threshold = 0.05, correction_method = c("g_SCS","bonferroni","fdr","false_discovery_rate","gSCS","analytical"))
+
+write.csv(gost_unordered$result, file = paste0(new_directory,"/","functional_unordered_",as.character(group1),"_",as.character(group2),".csv"))
+write.csv(gost_ordered$result, file = paste0(new_directory,"/","functional_ordered_",as.character(group1),"_",as.character(group2),".csv"))
+
+head(gost_unordered$result)
+head(gost_ordered$result)
+```
+
+```{r}
+#Display results of functional/network analysis#
+
+display_dataset <- noquote(readline(prompt = "Which functional analysis results do you want to display ( 'gost_unordered' or 'gost_ordered': "))
+display <- eval(parse(text = display_dataset))
+gostplot(display, capped = TRUE, interactive = TRUE)
+
+```
+
